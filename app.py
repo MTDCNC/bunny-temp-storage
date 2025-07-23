@@ -17,30 +17,49 @@ def upload_to_bunny():
     if not dropbox_link:
         return jsonify({"error": "Missing Dropbox shared link"}), 400
 
-    # Extract file name from URL
+    # Extract file name
     parsed = urlparse(dropbox_link)
     file_name = unquote(parsed.path.split('/')[-1])
+    print(f"📥 Starting upload for file: {file_name}")
 
-    # 1. Download from Dropbox API (shared link streaming)
-    dropbox_headers = {
-        "Authorization": f"Bearer {DROPBOX_ACCESS_TOKEN}",
-        "Dropbox-API-Arg": f'{{"url": "{dropbox_link}"}}'
-    }
-    resp = requests.post("https://content.dropboxapi.com/2/sharing/get_shared_link_file",
-                         headers=dropbox_headers, stream=True)
-    resp.raise_for_status()
+    try:
+        # 1. Download from Dropbox
+        dropbox_headers = {
+            "Authorization": f"Bearer {DROPBOX_ACCESS_TOKEN}",
+            "Dropbox-API-Arg": f'{{"url": "{dropbox_link}"}}'
+        }
+        resp = requests.post(
+            "https://content.dropboxapi.com/2/sharing/get_shared_link_file",
+            headers=dropbox_headers, stream=True
+        )
+        resp.raise_for_status()
+        print("✅ File downloaded from Dropbox.")
 
-    # 2. Upload to Bunny
-    bunny_url = f"https://uk.storage.bunnycdn.com/{BUNNY_ZONE_NAME}/{file_name}"
-    bunny_headers = {
-        "AccessKey": BUNNY_API_KEY,
-        "Content-Type": "application/octet-stream"
-    }
-    bunny_resp = requests.put(bunny_url, data=resp.iter_content(chunk_size=1048576), headers=bunny_headers)
-    bunny_resp.raise_for_status()
+        # 2. Upload to Bunny
+        bunny_url = f"https://uk.storage.bunnycdn.com/{BUNNY_ZONE_NAME}/{file_name}"
+        print(f"📤 Uploading to Bunny: {bunny_url}")
+        bunny_headers = {
+            "AccessKey": BUNNY_API_KEY,
+            "Content-Type": "application/octet-stream"
+        }
+        bunny_resp = requests.put(
+            bunny_url,
+            data=resp.iter_content(chunk_size=1048576),
+            headers=bunny_headers
+        )
 
-    cdn_url = f"{CDN_PREFIX}/{file_name}"
-    return jsonify({"cdn_url": cdn_url, "file_name": file_name}), 200
+        print(f"🔁 Bunny response: {bunny_resp.status_code}")
+        print(f"📝 Bunny body: {bunny_resp.text}")
+        bunny_resp.raise_for_status()
+
+        cdn_url = f"{CDN_PREFIX}/{file_name}"
+        print(f"✅ File uploaded to Bunny. CDN: {cdn_url}")
+        return jsonify({"cdn_url": cdn_url, "file_name": file_name}), 200
+
+    except Exception as e:
+        print(f"❌ Upload failed: {str(e)}")
+        return jsonify({"error": "Upload failed", "details": str(e)}), 500
+
 
 @app.route("/", methods=["GET"])
 def home():
