@@ -26,11 +26,13 @@ def upload_to_bunny():
         # 1. Download from Dropbox
         dropbox_headers = {
             "Authorization": f"Bearer {DROPBOX_ACCESS_TOKEN}",
-            "Dropbox-API-Arg": f'{{"url": "{dropbox_link}"}}'
-            print("🔍 Dropbox Header Preview:")
-            print(f"Authorization: Bearer {DROPBOX_ACCESS_TOKEN[:8]}...")  # Redacted for safety
-            print("Dropbox-API-Arg:", dropbox_headers["Dropbox-API-Arg"])
+            "Dropbox-API-Arg": f'{{"url": "{dropbox_link}"}}'            
         }
+
+        print("🔍 Dropbox Header Preview:")
+        print(f"Authorization: Bearer {DROPBOX_ACCESS_TOKEN[:8]}...")  # Redacted for safety
+        print("Dropbox-API-Arg:", dropbox_headers["Dropbox-API-Arg"])
+        
         resp = requests.post(
             "https://content.dropboxapi.com/2/sharing/get_shared_link_file",
             headers=dropbox_headers, stream=True
