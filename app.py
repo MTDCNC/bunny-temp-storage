@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+import json
 from urllib.parse import urlparse, unquote
 
 app = Flask(__name__)
@@ -8,6 +9,7 @@ app = Flask(__name__)
 BUNNY_API_KEY = "4d1223b1-d399-462e-97f6e0a7f9c8-7c8f-4767"
 BUNNY_ZONE_NAME = "zapier-temp-files"
 CDN_PREFIX = "https://zapier-temp-cdn.b-cdn.net"
+BUNNY_STATUS_FILE = "bunny_status.json"
 
 def get_dropbox_access_token():
     response = requests.post(
@@ -30,7 +32,6 @@ def upload_to_bunny():
     if not dropbox_link:
         return jsonify({"error": "Missing Dropbox shared link"}), 400
 
-    # Extract file name
     parsed = urlparse(dropbox_link)
     file_name = unquote(parsed.path.split('/')[-1])
     print(f"📥 Starting upload for file: {file_name}")
@@ -39,7 +40,6 @@ def upload_to_bunny():
         # 🔑 Get fresh Dropbox token
         access_token = get_dropbox_access_token()
 
-        # 1. Download from Dropbox
         dropbox_headers = {
             "Authorization": f"Bearer {access_token}",
             "Dropbox-API-Arg": f'{{"url": "{dropbox_link}"}}'
@@ -56,7 +56,7 @@ def upload_to_bunny():
         resp.raise_for_status()
         print("✅ File downloaded from Dropbox.")
 
-        # 2. Upload to Bunny
+        # 🐇 Upload to Bunny
         bunny_url = f"https://uk.storage.bunnycdn.com/{BUNNY_ZONE_NAME}/{file_name}"
         print(f"📤 Uploading to Bunny: {bunny_url}")
         bunny_headers = {
@@ -75,11 +75,39 @@ def upload_to_bunny():
 
         cdn_url = f"{CDN_PREFIX}/{file_name}"
         print(f"✅ File uploaded to Bunny. CDN: {cdn_url}")
+
+        # 💾 Save upload status
+        status = {}
+        if os.path.exists(BUNNY_STATUS_FILE):
+            with open(BUNNY_STATUS_FILE, "r") as f:
+                status = json.load(f)
+        status[file_name] = cdn_url
+        with open(BUNNY_STATUS_FILE, "w") as f:
+            json.dump(status, f)
+
         return jsonify({"cdn_url": cdn_url, "file_name": file_name}), 200
 
     except Exception as e:
         print(f"❌ Upload failed: {str(e)}")
         return jsonify({"error": "Upload failed", "details": str(e)}), 500
+
+@app.route("/bunny-status-check", methods=["GET"])
+def bunny_status_check():
+    filename = request.args.get("filename")
+    if not filename:
+        return jsonify({"error": "Missing filename parameter"}), 400
+
+    if not os.path.exists(BUNNY_STATUS_FILE):
+        return jsonify({"error": "No status file found"}), 404
+
+    with open(BUNNY_STATUS_FILE, "r") as f:
+        status = json.load(f)
+
+    cdn_url = status.get(filename)
+    if cdn_url:
+        return jsonify({"cdn_url": cdn_url}), 200
+    else:
+        return jsonify({"error": "CDN URL not found"}), 404
 
 @app.route("/", methods=["GET"])
 def home():
