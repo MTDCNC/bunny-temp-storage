@@ -1,115 +1,111 @@
+# === app.py for Bunny Temp Storage Service ===
 from flask import Flask, request, jsonify
 import requests
 import os
 import json
 import threading
+import sys
 from urllib.parse import urlparse, unquote
 
 app = Flask(__name__)
 
-BUNNY_API_KEY = os.environ.get("BUNNY_API_KEY")  # Set this in Render
-BUNNY_ZONE_NAME = "zapier-temp-files"
-CDN_PREFIX = "https://zapier-temp-cdn.b-cdn.net"
-BUNNY_STATUS_FILE = "bunny_status.json"
+# Config
+BUNNY_API_KEY     = os.environ.get("BUNNY_API_KEY")
+BUNNY_ZONE_NAME   = "zapier-temp-files"
+CDN_PREFIX        = "https://zapier-temp-cdn.b-cdn.net"
+STATUS_FILENAME   = "bunny_status.json"
+
+# Always unbuffer stdout
+sys.stdout.reconfigure(line_buffering=True)
+
 
 def get_dropbox_access_token():
-    response = requests.post(
+    resp = requests.post(
         "https://api.dropboxapi.com/oauth2/token",
         data={
-            "grant_type": "refresh_token",
+            "grant_type":    "refresh_token",
             "refresh_token": os.environ["DROPBOX_REFRESH_TOKEN"],
-            "client_id": os.environ["DROPBOX_CLIENT_ID"],
+            "client_id":     os.environ["DROPBOX_CLIENT_ID"],
             "client_secret": os.environ["DROPBOX_CLIENT_SECRET"]
         }
     )
-    response.raise_for_status()
-    return response.json()["access_token"]
+    resp.raise_for_status()
+    return resp.json()["access_token"]
 
-def save_bunny_status(file_name, cdn_url):
-    status = {}
-    if os.path.exists(BUNNY_STATUS_FILE):
-        with open(BUNNY_STATUS_FILE, "r") as f:
-            status = json.load(f)
-    status[file_name] = cdn_url
-    with open(BUNNY_STATUS_FILE, "w") as f:
-        json.dump(status, f)
 
-def upload_file_to_bunny(dropbox_link, file_name):
+def save_bunny_status(filename, cdn_url):
+    # Load existing
     try:
-        print(f"⬇️ [Async] Starting download for {file_name}...")
+        with open(STATUS_FILENAME, 'r') as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError):
+        data = {}
 
-        access_token = get_dropbox_access_token()
-        dropbox_headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Dropbox-API-Arg": f'{{"url": "{dropbox_link}"}}'
+    data[filename] = cdn_url
+    # Write + flush + fsync
+    with open(STATUS_FILENAME, 'w') as f:
+        json.dump(data, f)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def upload_file_to_bunny(shared_link, filename):
+    try:
+        print(f"⬇️ [Async] Downloading {filename} from Dropbox...", flush=True)
+        token = get_dropbox_access_token()
+        headers = {
+            'Authorization':           f"Bearer {token}",
+            'Dropbox-API-Arg':         json.dumps({"url": shared_link})
         }
-
-        resp = requests.post(
-            "https://content.dropboxapi.com/2/sharing/get_shared_link_file",
-            headers=dropbox_headers, stream=True
-        )
+        resp = requests.post("https://content.dropboxapi.com/2/sharing/get_shared_link_file", headers=headers, stream=True)
         resp.raise_for_status()
-        print("✅ [Async] File downloaded from Dropbox.")
+        print("✅ [Async] Download complete", flush=True)
 
-        bunny_url = f"https://uk.storage.bunnycdn.com/{BUNNY_ZONE_NAME}/{file_name}"
-        print(f"📤 [Async] Uploading to Bunny: {bunny_url}")
-        bunny_headers = {
-            "AccessKey": BUNNY_API_KEY,
-            "Content-Type": "application/octet-stream"
-        }
-        bunny_resp = requests.put(
-            bunny_url,
-            data=resp.iter_content(chunk_size=1048576),
-            headers=bunny_headers
-        )
-        print(f"🔁 Bunny response: {bunny_resp.status_code}")
-        print(f"📝 Bunny body: {bunny_resp.text}")
-        bunny_resp.raise_for_status()
+        bunny_url = f"https://uk.storage.bunnycdn.com/{BUNNY_ZONE_NAME}/{filename}"
+        print(f"📤 [Async] Uploading to Bunny: {bunny_url}", flush=True)
+        put_headers = { 'AccessKey': BUNNY_API_KEY, 'Content-Type': 'application/octet-stream' }
+        put_resp = requests.put(bunny_url, data=resp.iter_content(1048576), headers=put_headers)
+        print(f"🔁 Bunny response: {put_resp.status_code}", flush=True)
+        put_resp.raise_for_status()
 
-        cdn_url = f"{CDN_PREFIX}/{file_name}"
-        print(f"✅ [Async] File uploaded. CDN: {cdn_url}")
+        cdn_url = f"{CDN_PREFIX}/{filename}"
+        print(f"✅ [Async] File live at {cdn_url}", flush=True)
+        save_bunny_status(filename, cdn_url)
+    except Exception as err:
+        print(f"❌ [Async] Error for {filename}: {err}", flush=True)
 
-        save_bunny_status(file_name, cdn_url)
-    except Exception as e:
-        print(f"❌ [Async] Upload failed for {file_name}: {e}")
 
-@app.route("/upload-to-bunny", methods=["POST"])
+@app.route('/upload-to-bunny', methods=['POST'])
 def upload_to_bunny():
-    data = request.json
-    dropbox_link = data.get("dropbox_shared_link")
+    data = request.json or {}
+    link = data.get('dropbox_shared_link')
+    if not link:
+        return jsonify({"error": "Missing dropbox_shared_link"}), 400
 
-    if not dropbox_link:
-        return jsonify({"error": "Missing Dropbox shared link"}), 400
-
-    parsed = urlparse(dropbox_link)
-    file_name = unquote(parsed.path.split('/')[-1])
-    print(f"📥 Received upload request for: {file_name}")
-
-    # 🔁 Start upload in background
-    thread = threading.Thread(target=upload_file_to_bunny, args=(dropbox_link, file_name))
+    filename = unquote(urlparse(link).path.split('/')[-1])
+    print(f"📥 Received: {filename}, starting async upload...", flush=True)
+    thread = threading.Thread(target=upload_file_to_bunny, args=(link, filename), daemon=True)
     thread.start()
+    return jsonify({"status": "processing", "filename": filename}), 202
 
-    # 🔁 Return immediately
-    return jsonify({"status": "processing", "filename": file_name}), 202
 
-@app.route("/bunny-status-check", methods=["GET"])
+@app.route('/bunny-status-check', methods=['GET'])
 def bunny_status_check():
-    filename = request.args.get("filename")
-    if not filename:
-        return jsonify({"error": "Missing filename parameter"}), 400
+    name = request.args.get('filename')
+    if not name:
+        return jsonify({"error": "Missing filename"}), 400
+    try:
+        with open(STATUS_FILENAME, 'r') as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError):
+        return jsonify({"error": "No status file"}), 404
 
-    if not os.path.exists(BUNNY_STATUS_FILE):
-        return jsonify({"error": "No status file found"}), 404
+    url = data.get(name)
+    if url:
+        return jsonify({"cdn_url": url}), 200
+    return jsonify({"error": "Not found"}), 404
 
-    with open(BUNNY_STATUS_FILE, "r") as f:
-        status = json.load(f)
 
-    cdn_url = status.get(filename)
-    if cdn_url:
-        return jsonify({"cdn_url": cdn_url}), 200
-    else:
-        return jsonify({"error": "CDN URL not found"}), 404
-
-@app.route("/", methods=["GET"])
+@app.route('/', methods=['GET'])
 def home():
     return "Bunny Async Uploader is live!", 200
