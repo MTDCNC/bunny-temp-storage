@@ -142,8 +142,10 @@ def upload_to_bunny():
     if not link:
         return jsonify({"error": "Missing dropbox_shared_link"}), 400
 
-    filename = unquote(urlparse(link).path.split('/')[-1])
-    print(f"📥 Received: {filename}, starting async upload...", flush=True)
+    parsed_link = urlparse(link)
+    filename = os.path.basename(parsed_link.path)
+    filename = unquote(filename).strip()
+    print(f"📦 Normalized filename: {filename}", flush=True)
     thread = threading.Thread(target=upload_file_to_bunny, args=(link, filename), daemon=True)
     thread.start()
     return jsonify({"status": "processing", "filename": filename}), 202
