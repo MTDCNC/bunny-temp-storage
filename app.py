@@ -137,3 +137,96 @@ def upload_file_to_bunny(shared_link: str, filename: str):
             break
         except requests.HTTPError as err:
             code = err.response.status_code if err.response else None
+            print(f"⚠️ [Async] Dropbox download error (code {code}): {err}", flush=True)
+            if code == 409 and attempts == 0:
+                print("⬆️ [Async] Retrying with dl=1 parameter...", flush=True)
+                attempts += 1
+                continue
+            elif code == 404:
+                print(f"❌ [Async] File not found: {filename}", flush=True)
+                save_bunny_status(filename, error="file_not_found")
+                return
+            else:
+                print(f"❌ [Async] Failed to download {filename}, aborting.", flush=True)
+                save_bunny_status(filename, error=str(err))
+                return
+        except Exception as err:
+            print(f"❌ [Async] Download error: {err}", flush=True)
+            save_bunny_status(filename, error=str(err))
+            return
+
+    if resp is None:
+        print(f"❌ [Async] Download never succeeded for {filename}, aborting.", flush=True)
+        save_bunny_status(filename, error="download_failed")
+        return
+
+    # Upload to Bunny
+    try:
+        bunny_url = f"https://uk.storage.bunnycdn.com/{BUNNY_ZONE_NAME}/{filename}"
+        print(f"📤 [Async] Uploading to Bunny: {bunny_url}", flush=True)
+        put_headers = {
+            "AccessKey": BUNNY_API_KEY,
+            "Content-Type": "application/octet-stream",
+        }
+        put_resp = requests.put(bunny_url, data=resp.iter_content(1048576), headers=put_headers, timeout=600)
+        print(f"🔁 Bunny response: {put_resp.status_code}", flush=True)
+        put_resp.raise_for_status()
+
+        # Return a URL-encoded path component so spaces are always valid
+        cdn_url = f"{CDN_PREFIX}/{quote(filename)}"
+        print(f"✅ [Async] File live at {cdn_url}", flush=True)
+        save_bunny_status(filename, cdn_url=cdn_url)
+    except Exception as err:
+        print(f"❌ [Async] Bunny upload error for {filename}: {err}", flush=True)
+        save_bunny_status(filename, error=str(err))
+
+# -----------------------
+# Routes
+# -----------------------
+
+@app.route("/upload-to-bunny", methods=["POST"])
+def upload_to_bunny():
+    data = request.json or {}
+    link = data.get("dropbox_shared_link")
+    if not link:
+        return jsonify({"error": "Missing dropbox_shared_link"}), 400
+
+    # Filename from the Dropbox URL path (handles both spaces and dashes)
+    parsed_link = urlparse(link)
+    filename = op.basename(parsed_link.path)
+    filename = unquote(filename).strip()
+    print(f"📦 Normalized filename: {filename}", flush=True)
+
+    thread = threading.Thread(target=upload_file_to_bunny, args=(link, filename), daemon=True)
+    thread.start()
+    return jsonify({"status": "processing", "filename": filename}), 202
+
+@app.route("/bunny-status-check", methods=["GET"])
+def bunny_status_check():
+    raw = request.args.get("filename", "")
+    if not raw:
+        return jsonify({"error": "Missing filename"}), 400
+
+    # Accept + or %20 as spaces; take only basename
+    name = op.basename(unquote_plus(raw)).strip()
+    data = _load_status()
+    if not data:
+        return jsonify({"error": "No status file"}), 404
+
+    # Build a case-insensitive map
+    ci_map = {_canon(k): v for k, v in data.items()}
+
+    # Try exact + variants (case-insensitive)
+    for cand in _variants(name) + [_canon(name)]:
+        hit = ci_map.get(_canon(cand))
+        if hit:
+            if "error" in hit:
+                return jsonify({"error": hit["error"]}), 404
+            url = hit.get("cdn_url") if isinstance(hit, dict) else hit
+            return jsonify({"cdn_url": url}), 200
+
+    return jsonify({"error": "Not found"}), 404
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Bunny Async Uploader is live!", 200
